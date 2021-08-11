@@ -193,7 +193,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
         &self,
         reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
-        _rng: &mut RNG,
+        rng: &mut RNG,
         num: usize,
     ) -> Vec<AuthAdditiveShare<Fp64<P>>>
     where
@@ -210,25 +210,25 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
 
         // Final result vector
         // TODO: Benchmark w/o mutex in single thread
-        let result = Arc::new(Mutex::new(vec![AuthAdditiveShare::zero(); num]));
+        let mut result = Arc::new(Mutex::new(vec![AuthAdditiveShare::zero(); num]));
 
         // Vector which holds states for post processing server result
-        let states = RwLock::new(vec![None; batches]);
+        let mut states = RwLock::new(vec![None; batches]);
 
         rayon::scope(|s| {
             // Create a channel which all threads will push state to be sent to the server
             let (send_1, mut recv_1) = channel::bounded(batches);
             // Create a channel which will contain all state receieved from the server
-            let (send_2, recv_2) = channel::bounded(batches);
+            let (send_2, mut recv_2) = channel::bounded(batches);
 
             for thread_idx in 0..num_threads {
-                let send = send_1.clone(); // TODO: Change name
+                let mut send = send_1.clone(); // TODO: Change name
                 let mut recv = recv_2.clone();
                 let result = result.clone();
                 let states = &states;
-                s.spawn(move |_| {
+                s.spawn(move |s| {
                     // TODO: Remove
-                    let rng = &mut ChaChaRng::from_seed(RANDOMNESS);
+                    let mut rng = &mut ChaChaRng::from_seed(RANDOMNESS);
                     // If this is the last thread, only generate as many rands as needed
                     let num_rands = if thread_idx == num_threads - 1 {
                         num - thread_idx * Self::BATCH_SIZE * batches_per_thread
@@ -236,7 +236,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
                         Self::BATCH_SIZE * batches_per_thread
                     };
                     let mut rands = Vec::with_capacity(num_rands);
-                    for _ in 0..num_rands {
+                    for i in 0..num_rands {
                         rands.push(Fp64::<P>::uniform(rng).into_repr().0);
                     }
 
@@ -245,9 +245,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
                         // Preprocess state and ciphertexts
                         let (seal_state, ct) = self.backend.rands_preprocess(rands_batch);
                         // Push ciphertexts and state to channel
-                        task::block_on(async {
-                            send.send((batch_idx, seal_state, ct)).await.unwrap()
-                        });
+                        task::block_on(async { send.send((batch_idx, seal_state, ct)).await });
                         // TODO Simulate ZK proof time
                         if i % 6 == 0 {
                             // Proving time
@@ -315,18 +313,18 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
 
                 // Future for receiving result from server
                 let recv_future = async {
-                    let send = send_2.clone();
+                    let mut send = send_2.clone();
                     let recv_time = timer_start!(|| "Receiving ciphertexts from server");
                     for _ in 0..batches {
                         // Receive ciphertexts from the server
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (i, r_ct) = recv_message.msg();
+                        let (i, mut r_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, r_mac_ct) = recv_message.msg();
+                        let (_, mut r_mac_ct) = recv_message.msg();
                         // Push ciphertexts to channel to be processed by a thread
-                        send.send((i, r_ct, r_mac_ct)).await.unwrap();
+                        send.send((i, r_ct, r_mac_ct)).await;
                     }
                     timer_end!(recv_time);
                     // Drop the remaining channel
@@ -345,7 +343,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
         &self,
         reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
-        _rng: &mut RNG,
+        rng: &mut RNG,
         num: usize,
     ) -> Vec<Triple<Fp64<P>>>
     where
@@ -362,7 +360,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
 
         // Final result vector
         // TODO: Benchmark w/o mutex in single thread
-        let result = Arc::new(Mutex::new(vec![
+        let mut result = Arc::new(Mutex::new(vec![
             Triple {
                 a: AuthAdditiveShare::zero(),
                 b: AuthAdditiveShare::zero(),
@@ -372,22 +370,22 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
         ]));
 
         // Vector which holds states for post processing server result
-        let states = RwLock::new(vec![None; batches]);
+        let mut states = RwLock::new(vec![None; batches]);
 
         rayon::scope(|s| {
             // Create a channel which all threads will push state to be sent to the server
             let (send_1, mut recv_1) = channel::bounded(batches);
             // Create a channel which will contain all state receieved from the server
-            let (send_2, recv_2) = channel::bounded(batches);
+            let (send_2, mut recv_2) = channel::bounded(batches);
 
             for thread_idx in 0..num_threads {
-                let send = send_1.clone(); // TODO: Change name
+                let mut send = send_1.clone(); // TODO: Change name
                 let mut recv = recv_2.clone();
                 let result = result.clone();
                 let states = &states;
-                s.spawn(move |_| {
+                s.spawn(move |s| {
                     // TODO: Remove
-                    let rng = &mut ChaChaRng::from_seed(RANDOMNESS);
+                    let mut rng = &mut ChaChaRng::from_seed(RANDOMNESS);
                     // If this is the last thread, only generate as many rands as needed
                     let num_rands = if thread_idx == num_threads - 1 {
                         num - thread_idx * Self::BATCH_SIZE * batches_per_thread
@@ -396,7 +394,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
                     };
                     let mut a = Vec::with_capacity(num_rands);
                     let mut b = Vec::with_capacity(num_rands);
-                    for _ in 0..num_rands {
+                    for i in 0..num_rands {
                         a.push(Fp64::<P>::uniform(rng).into_repr().0);
                         b.push(Fp64::<P>::uniform(rng).into_repr().0);
                     }
@@ -412,9 +410,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
                             self.backend.triples_preprocess(a_batch, b_batch);
                         // Push ciphertexts and state to channel
                         task::block_on(async {
-                            send.send((batch_idx, seal_state, a_ct, b_ct))
-                                .await
-                                .unwrap()
+                            send.send((batch_idx, seal_state, a_ct, b_ct)).await
                         });
                         // TODO Simulate ZK proof time
                         if i % 6 == 0 {
@@ -525,32 +521,31 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ClientOfflineMPC<Fp64<P>, SealCl
 
                 // Future for receiving result from server
                 let recv_future = async {
-                    let send = send_2.clone();
+                    let mut send = send_2.clone();
                     let recv_time = timer_start!(|| "Receiving ciphertexts from server");
                     for _ in 0..batches {
                         // Receive ciphertexts from the server
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (i, a_ct) = recv_message.msg();
+                        let (i, mut a_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, b_ct) = recv_message.msg();
+                        let (_, mut b_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, c_ct) = recv_message.msg();
+                        let (_, mut c_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, a_mac_ct) = recv_message.msg();
+                        let (_, mut a_mac_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, b_mac_ct) = recv_message.msg();
+                        let (_, mut b_mac_ct) = recv_message.msg();
                         let recv_message: MsgRcv =
                             bytes::async_deserialize(&mut *reader).await.unwrap();
-                        let (_, c_mac_ct) = recv_message.msg();
+                        let (_, mut c_mac_ct) = recv_message.msg();
                         // Push ciphertexts to channel to be processed by a thread
                         send.send((i, a_ct, b_ct, c_ct, a_mac_ct, b_mac_ct, c_mac_ct))
-                            .await
-                            .unwrap();
+                            .await;
                     }
                     timer_end!(recv_time);
                     // Drop the remaining channel
@@ -582,6 +577,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ServerOfflineMPC<Fp64<P>, SealSe
 
         // Calculate number of batches to send per thread
         let batches = (num as f64 / Self::BATCH_SIZE as f64).ceil() as usize;
+        // TODO
         let num_threads = min(batches, rayon::current_num_threads() - 1);
         let batches_per_thread = (batches as f64 / num_threads as f64).ceil() as usize;
 
@@ -626,7 +622,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ServerOfflineMPC<Fp64<P>, SealSe
                 let rx = rx_inp[thread_idx].clone();
                 let tx = tx_out.clone();
 
-                s.spawn(move |_| {
+                s.spawn(move |s| {
                     for (i, (rand, share, mac_share)) in izip!(
                         rands.chunks(Self::BATCH_SIZE),
                         shares.chunks(Self::BATCH_SIZE),
@@ -796,7 +792,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ServerOfflineMPC<Fp64<P>, SealSe
                 let rx = rx_inp[thread_idx].clone();
                 let tx = tx_out.clone();
 
-                s.spawn(move |_| {
+                s.spawn(move |s| {
                     for (
                         i,
                         (
@@ -936,7 +932,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>> for ServerOfflineMPC<Fp64<P>, SealSe
 
 /// Insecure offline MPC phase for testing
 pub struct InsecureClientOfflineMPC<T: AuthShare, C: ClientGen> {
-    _backend: PhantomData<C>,
+    backend: C,
     _share: PhantomData<T>,
 }
 
@@ -951,9 +947,9 @@ type InsecureRandsSend<'a, F> = OutMessage<'a, Vec<AuthAdditiveShare<F>>, Offlin
 type InsecureRandsRcv<F> = InMessage<Vec<AuthAdditiveShare<F>>, OfflineMPCProtocolType>;
 
 impl<'a, P: Fp64Parameters> InsecureClientOfflineMPC<Fp64<P>, SealClientGen<'a>> {
-    pub fn new(_cfhe: &'a ClientFHE) -> Self {
+    pub fn new(cfhe: &'a ClientFHE) -> Self {
         Self {
-            _backend: PhantomData,
+            backend: SealClientGen::new(cfhe),
             _share: PhantomData,
         }
     }
@@ -974,9 +970,9 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>>
     fn rands_gen<R: Read + Send + Unpin, W: Write + Send + Unpin, RNG: RngCore + CryptoRng>(
         &self,
         reader: &mut IMuxAsync<R>,
-        _writer: &mut IMuxAsync<W>,
-        _rng: &mut RNG,
-        _num: usize,
+        writer: &mut IMuxAsync<W>,
+        rng: &mut RNG,
+        num: usize,
     ) -> Vec<AuthAdditiveShare<Fp64<P>>> {
         let start_time = timer_start!(|| "Insecure Client pairwise randomness generation");
         let recv_message: InsecureRandsRcv<Fp64<_>> = bytes::deserialize(&mut *reader).unwrap();
@@ -988,9 +984,9 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>>
     fn triples_gen<R: Read + Send + Unpin, W: Write + Send + Unpin, RNG: RngCore + CryptoRng>(
         &self,
         reader: &mut IMuxAsync<R>,
-        _writer: &mut IMuxAsync<W>,
-        _rng: &mut RNG,
-        _num: usize,
+        writer: &mut IMuxAsync<W>,
+        rng: &mut RNG,
+        num: usize,
     ) -> Vec<Triple<Fp64<P>>> {
         let start_time = timer_start!(|| "Insecure Client triples generation");
         let recv_message: InsecureTriplesRcv<Fp64<_>> = bytes::deserialize(&mut *reader).unwrap();
@@ -1005,7 +1001,7 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>>
 {
     fn rands_gen<R: Read + Send + Unpin, W: Write + Send + Unpin, RNG: RngCore + CryptoRng>(
         &self,
-        _reader: &mut IMuxAsync<R>,
+        reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
         rng: &mut RNG,
         num: usize,
@@ -1030,9 +1026,9 @@ impl<P: Fp64Parameters> OfflineMPC<Fp64<P>>
 
     fn triples_gen<R: Read + Send + Unpin, W: Write + Send + Unpin, RNG: RngCore + CryptoRng>(
         &self,
-        _reader: &mut IMuxAsync<R>,
+        reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
-        _rng: &mut RNG,
+        rng: &mut RNG,
         num: usize,
     ) -> Vec<Triple<Fp64<P>>> {
         let start_time = timer_start!(|| "Insecure Server triples generation");
@@ -1068,10 +1064,11 @@ mod tests {
         io::{BufReader, BufWriter, Read, Write},
         net::{TcpListener, TcpStream},
     };
-    use io_utils::imux::IMuxAsync;
+    use io_utils::IMuxAsync;
     use protocols_sys::KeyShare;
     use rand::SeedableRng;
     use rand_chacha::ChaChaRng;
+    use rayon::prelude::*;
 
     const RANDOMNESS: [u8; 32] = [
         0x99, 0xe0, 0x8f, 0xbc, 0x89, 0xa7, 0x34, 0x01, 0x45, 0x86, 0x82, 0xb6, 0x51, 0xda, 0xf4,

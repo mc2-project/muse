@@ -6,6 +6,7 @@ use bench_utils::*;
 use nn::tensors::*;
 use protocols::AdditiveShare;
 use rand::{CryptoRng, Rng, RngCore};
+use std::io::{self, Read, Write};
 
 use nn::{
     layers::{
@@ -17,9 +18,14 @@ use nn::{
     NeuralNetwork,
 };
 
+//pub mod inference;
 pub mod latency;
+//pub mod linear_only;
 pub mod minionn;
 pub mod mnist;
+//pub mod resnet32;
+//pub mod throughput;
+//pub mod validation;
 
 pub struct TenBitExpParams {}
 

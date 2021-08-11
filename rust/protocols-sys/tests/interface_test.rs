@@ -4,7 +4,7 @@ use algebra::{
     UniformRandom,
 };
 use crypto_primitives::{
-    additive_share::{AuthAdditiveShare, Share},
+    additive_share::{AuthAdditiveShare, AuthShare, Share},
     beavers_mul::Triple,
 };
 use itertools::izip;
@@ -364,8 +364,8 @@ fn test_rand_gen() {
     let sfhe = key_share.receive(keys_vec);
     let mac_key = F::uniform(&mut rng);
 
-    let client_gen = SealClientGen::new(&cfhe);
-    let server_gen = SealServerGen::new(&sfhe, mac_key.into_repr().0);
+    let mut client_gen = SealClientGen::new(&cfhe);
+    let mut server_gen = SealServerGen::new(&sfhe, mac_key.into_repr().0);
 
     let mut client_randomizers = Vec::with_capacity(num);
     let mut server_randomizers = Vec::with_capacity(num);
@@ -423,8 +423,8 @@ fn test_triple_gen() {
     let sfhe = key_share.receive(keys_vec);
     let mac_key = F::uniform(&mut rng);
 
-    let client_gen = SealClientGen::new(&cfhe);
-    let server_gen = SealServerGen::new(&sfhe, mac_key.into_repr().0);
+    let mut client_gen = SealClientGen::new(&cfhe);
+    let mut server_gen = SealServerGen::new(&sfhe, mac_key.into_repr().0);
 
     let mut client_a_rand = Vec::with_capacity(num);
     let mut client_b_rand = Vec::with_capacity(num);

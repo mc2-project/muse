@@ -3,13 +3,14 @@ name = "crypto-primitives"
 version = "0.1.0"
 edition = "2018"
 authors = [
-    "Ryan Lehmkuhl",
     "Pratyush Mishra",
+    "Ryan Lehmkuhl",
     "Akshayaram Srinivasan",
     "Wenting Zheng",
     "Raluca Ada Popa",
 ]
-description = "Cryptographic primitives used in Muse"
+description = "Cryptographic primitives used in Delphi"
+repository = "https://github.com/mc2/delphi"
 keywords = ["cryptography", "finite fields", "garbled circuits", "secret sharing"]
 categories = ["cryptography"]
 include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]

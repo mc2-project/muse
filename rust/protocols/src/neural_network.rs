@@ -7,7 +7,11 @@ use neural_network::{
 
 use async_std::io::{Read, Write};
 use rand::{CryptoRng, RngCore};
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    sync::{Arc, Condvar, Mutex},
+};
 
 use algebra::{
     fixed_point::{FixedPoint, FixedPointParameters},
@@ -25,12 +29,15 @@ use crypto_primitives::{
     AuthShare, Share,
 };
 
-use crate::{gc::ReluProtocol, linear_layer::LinearProtocol};
+use crate::{cds::CDSProtocol, gc::ReluProtocol, linear_layer::LinearProtocol, mpc_offline::*};
+
 use io_utils::imux::IMuxAsync;
 use protocols_sys::{
     client_acg, server_acg, ClientACG, ClientFHE, SealClientACG, SealServerACG, ServerACG,
     ServerFHE,
 };
+
+use rayon::ThreadPoolBuilder;
 
 pub struct NNProtocol<P: FixedPointParameters> {
     _share: PhantomData<P>,
@@ -48,7 +55,6 @@ where
     pub relu_output_randomizers: Vec<P::Field>,
 }
 
-// TODO: Explain that everythign is sync but can use async
 // TODO: Add Online phase MACs
 pub struct ClientState<P: FixedPointParameters>
 where
@@ -69,48 +75,6 @@ pub struct NNProtocolType;
 pub type MsgRcv<P> = InMessage<Output<AdditiveShare<P>>, NNProtocolType>;
 pub type MsgSend<'a, P> = OutMessage<'a, Output<AdditiveShare<P>>, NNProtocolType>;
 
-// TODO: Update
-/// ```markdown
-///                   Client                     Server
-/// --------------------------------------------------------------------------
-/// --------------------------------------------------------------------------
-/// Offline:
-/// 1. Linear:
-///                 1. Sample randomizers r
-///                 for each layer.
-///
-///                       ------- Enc(r) ------>
-///                                              1. Sample randomness s_1.
-///                                              2. Compute Enc(Mr + s_1)
-///                       <--- Enc(Mr + s_1) ---
-///                 2. Store -(Mr + s1)
-///
-/// 2. ReLU:
-///                                              1. Sample online output randomizers s_2
-///                                              2. Garble ReLU circuit with s_2 as input.
-///                       <-------- GC ---------
-///                 1. OT input:
-///                     Mr_i + s_(1, i),
-///                     r_{i + 1}
-///                       <-------- OT -------->
-/// --------------------------------------------------------------------------
-///
-/// Online:
-///
-/// 1. Linear:
-///                       -- x_i + r_i + s_{2, i} ->
-///
-///
-///                                               1. Derandomize the input
-///                                               1. Compute y_i = M(x_i + r_i) + s_{1, i}
-///
-/// 2. ReLU:
-///                                               2. Compute garbled labels for y_i
-///                       <- garbled labels -----
-///                 1. Evaluate garbled circuit,
-///                 2. Set next layer input to
-///                 be output of GC.
-/// ```
 impl<P: FixedPointParameters, F: Fp64Parameters> NNProtocol<P>
 where
     <P::Field as PrimeField>::Params: Fp64Parameters,
@@ -121,17 +85,31 @@ where
     >,
     P::Field: AuthShare,
 {
-    pub fn offline_server_protocol<
+    /// TODO
+    pub fn offline_server_acg<
         R: Read + Send + Unpin,
         W: Write + Send + Unpin,
         RNG: CryptoRng + RngCore,
     >(
         reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
+        sfhe: &ServerFHE,
         neural_network: &NeuralNetwork<AdditiveShare<P>, FixedPoint<P>>,
         rng: &mut RNG,
-    ) -> Result<ServerState<P>, MpcError> {
-        let mut num_relu = 0;
+    ) -> Result<
+        (
+            BTreeMap<
+                usize,
+                (
+                    Input<AuthAdditiveShare<P::Field>>,
+                    Output<P::Field>,
+                    Output<AuthAdditiveShare<P::Field>>,
+                ),
+            >,
+            BTreeMap<usize, (P::Field, P::Field)>,
+        ),
+        MpcError,
+    > {
         let mut linear_shares: BTreeMap<
             usize,
             (
@@ -140,36 +118,13 @@ where
                 Output<AuthAdditiveShare<P::Field>>,
             ),
         > = BTreeMap::new();
-        let mut num_truncations = BTreeMap::new();
         let mut mac_keys: BTreeMap<usize, (P::Field, P::Field)> = BTreeMap::new();
-        let mut relu_layers = Vec::new();
-        let sfhe: ServerFHE = crate::server_keygen(reader)?;
 
-        let start_time = timer_start!(|| "Server offline phase");
         let linear_time = timer_start!(|| "Linear layers offline phase");
         for (i, layer) in neural_network.layers.iter().enumerate() {
             match layer {
-                Layer::NLL(NonLinearLayer::ReLU { dims, .. }) => {
-                    relu_layers.push(i);
-                    let (b, c, h, w) = dims.input_dimensions();
-                    num_relu += b * c * h * w;
-                }
+                Layer::NLL(NonLinearLayer::ReLU { .. }) => {}
                 Layer::LL(layer) => {
-                    // Keep track of the number of truncations needed for the output
-                    // shares of each linear layer
-                    let mut truncations = 0;
-                    // If linear layer is preceded by a linear layer, add a truncation
-                    if i != 0 && neural_network.layers[i - 1].is_linear() {
-                        truncations += 1;
-                    }
-                    // If linear layer is followed by a non-linear layer, add a truncation
-                    if i != neural_network.layers.len() - 1
-                        && neural_network.layers[i + 1].is_non_linear()
-                    {
-                        truncations += 1;
-                    }
-                    num_truncations.insert(i, truncations);
-
                     let (shares, keys) = match &layer {
                         LinearLayer::Conv2d { .. } | LinearLayer::FullyConnected { .. } => {
                             let mut acg_handler = match &layer {
@@ -246,63 +201,192 @@ where
             }
         }
         timer_end!(linear_time);
+        Ok((linear_shares, mac_keys))
+    }
 
-        // Preprocessing for next step with ReLUs; if a ReLU is layer i,
-        // we want to take output mac shares for the (linear) layer i - 1,
-        // and input mac shares for the (linear) layer i + 1.
-        let mut output_mac_keys = Vec::new();
-        let mut output_mac_shares = Vec::new();
+    pub fn offline_server_protocol<
+        R: Read + Send + Unpin + 'static,
+        W: Write + Send + Unpin + 'static,
+        RNG: CryptoRng + RngCore + Send,
+    >(
+        mut reader: IMuxAsync<R>,
+        mut writer: IMuxAsync<W>,
+        mut reader_2: IMuxAsync<R>,
+        mut writer_2: IMuxAsync<W>,
+        mut writer_3: IMuxAsync<W>,
+        neural_network: &NeuralNetwork<AdditiveShare<P>, FixedPoint<P>>,
+        rng: &mut RNG,
+        rng_2: &mut RNG,
+        rng_3: &mut RNG,
+    ) -> Result<ServerState<P>, MpcError> {
+        let sfhe: ServerFHE = crate::server_keygen(&mut reader)?;
+
+        let start_time = timer_start!(|| "Server offline phase");
+
+        // TODO
+        let mut num_relu = 0;
+        let mut num_truncations = BTreeMap::new();
         let mut output_truncations = Vec::new();
-        let mut input_mac_keys = Vec::new();
-        let mut input_mac_shares = Vec::new();
-        let mut layer_sizes = Vec::new();
-        let relu_time =
-            timer_start!(|| format!("ReLU layers offline phase with {} ReLUs", num_relu));
-        for &i in &relu_layers {
-            let output_share = &linear_shares
-                .get(&(i - 1))
-                .expect("should exist because every ReLU should be preceeded by a linear layer")
-                .2;
-            output_truncations.push(*num_truncations.get(&(i - 1)).unwrap());
-            output_mac_keys.push(mac_keys.get(&(i - 1)).unwrap().1);
-            output_mac_shares.extend_from_slice(
-                Input::unwrap_auth_mac(output_share.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
+        let mut relu_layers = Vec::new();
+        let mut relu_layer_sizes = Vec::new();
+        for (i, layer) in neural_network.layers.iter().enumerate() {
+            match layer {
+                Layer::NLL(NonLinearLayer::ReLU { dims, .. }) => {
+                    relu_layers.push(i);
+                    let (b, c, h, w) = dims.input_dimensions();
+                    let relus = b * c * h * w;
+                    num_relu += relus;
 
-            let input_share = &linear_shares
-                .get(&(i + 1))
-                .expect("should exist because every ReLU should be succeeded by a linear layer")
-                .0;
-            input_mac_keys.push(mac_keys.get(&(i + 1)).unwrap().0);
-            input_mac_shares.extend_from_slice(
-                Input::unwrap_auth_mac(input_share.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
-            // Output and input layers have the same size
-            layer_sizes.push(input_share.len());
+                    // TODO
+                    relu_layer_sizes.push(relus);
+                    output_truncations.push(*num_truncations.get(&(i - 1)).unwrap());
+                }
+                Layer::LL(_layer) => {
+                    // Keep track of the number of truncations needed for the output
+                    // shares of each linear layer
+                    let mut truncations = 0;
+                    // If linear layer is preceded by a linear layer, add a truncation
+                    if i != 0 && neural_network.layers[i - 1].is_linear() {
+                        truncations += 1;
+                    }
+                    // If linear layer is followed by a non-linear layer, add a truncation
+                    if i != neural_network.layers.len() - 1
+                        && neural_network.layers[i + 1].is_non_linear()
+                    {
+                        truncations += 1;
+                    }
+                    num_truncations.insert(i, truncations);
+                }
+            }
         }
 
-        // TODO: Have a CDS struct contain all of these arguments
-        let crate::gc::ServerState {
-            encoders: relu_encoders,
-            output_randomizers: relu_output_randomizers,
-        } = ReluProtocol::<P>::offline_server_protocol(
-            reader,
-            writer,
+        let modulus_bits = <P::Field as PrimeField>::size_in_bits();
+        let elems_per_label = (128.0 / (modulus_bits - 1) as f64).ceil() as usize;
+        let (num_rands, num_triples) = CDSProtocol::<P>::num_rands_triples(
+            relu_layers.len(),
             num_relu,
-            &sfhe,
-            layer_sizes.as_slice(),
-            output_mac_keys.as_slice(),
-            output_mac_shares.as_slice(),
-            output_truncations.as_slice(),
-            input_mac_keys.as_slice(),
-            input_mac_shares.as_slice(),
-            rng,
-        )?;
-        timer_end!(relu_time);
+            modulus_bits,
+            elems_per_label,
+        );
+
+        // TODO
+        let mac_key = P::Field::uniform(rng);
+        //let gen = crate::mpc_offline::InsecureServerOfflineMPC::new(&sfhe, mac_key.into_repr().0);
+        let gen = crate::mpc_offline::ServerOfflineMPC::new(&sfhe, mac_key.into_repr().0);
+
+        let mut linear_shares = BTreeMap::new();
+        let mut mac_keys = BTreeMap::new();
+
+        let triples = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+
+        let mut labels = Vec::new();
+
+        let mut gc_state = None;
+        let _ = rayon::scope(|s| {
+            s.spawn(|_| {
+                let pool = ThreadPoolBuilder::new().num_threads(6).build().unwrap();
+                pool.install(|| {
+                    // Generate triples in batches
+                    let batch_size = num_triples / 4;
+                    let batches = (num_triples as f64 / batch_size as f64).ceil() as usize;
+                    for i in 0..batches {
+                        let triples_batch_size =
+                            std::cmp::min(batch_size, num_triples - i * batch_size);
+                        let mut triples_batch =
+                            gen.triples_gen(&mut reader, &mut writer, rng, triples_batch_size);
+
+                        // Add the batch to the vector of triples
+                        let mut triples_vec = triples.0.lock().unwrap();
+                        triples_vec.append(&mut triples_batch);
+                        triples.1.notify_all();
+                    }
+                });
+            });
+
+            s.spawn(|_| {
+                let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+                pool.install(|| {
+                    let mut rands = Vec::new();
+                    rayon::scope(|s2| {
+                        // Generate input rands
+                        rands = gen.rands_gen(&mut reader_2, &mut writer_2, rng_2, num_rands);
+                        s2.spawn(|_| {
+                            // ACG/Garbling
+                            let result = NNProtocol::offline_server_acg(
+                                &mut reader_2,
+                                &mut writer_2,
+                                &sfhe,
+                                neural_network,
+                                rng_2,
+                            ).unwrap();
+                            linear_shares = result.0;
+                            mac_keys = result.1;
+                        });
+
+                        // TODO: Add timing stuff
+                        let result = ReluProtocol::<P>::offline_server_garbling(
+                            &mut writer_3,
+                            num_relu,
+                            &sfhe,
+                            relu_layer_sizes.as_slice(),
+                            output_truncations.as_slice(),
+                            rng_3,
+                        ).unwrap();
+                        gc_state = Some(result.0);
+                        labels = result.1;
+                    });
+                    // CDS
+                    // Preprocessing for next step with ReLUs; if a ReLU is layer i,
+                    // we want to take output mac shares for the (linear) layer i - 1,
+                    // and input mac shares for the (linear) layer i + 1.
+                    let mut output_mac_keys = Vec::new();
+                    let mut output_mac_shares = Vec::new();
+                    let mut input_mac_keys = Vec::new();
+                    let mut input_mac_shares = Vec::new();
+                    for &i in &relu_layers {
+                        let output_share = &linear_shares
+                            .get(&(i - 1))
+                            .expect("should exist because every ReLU should be preceeded by a linear layer")
+                            .2;
+                        output_mac_keys.push(mac_keys.get(&(i - 1)).unwrap().1);
+                        output_mac_shares.extend_from_slice(
+                            Input::unwrap_auth_mac(output_share.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+
+                        let input_share = &linear_shares
+                            .get(&(i + 1))
+                            .expect("should exist because every ReLU should be succeeded by a linear layer")
+                            .0;
+                        input_mac_keys.push(mac_keys.get(&(i + 1)).unwrap().0);
+                        input_mac_shares.extend_from_slice(
+                            Input::unwrap_auth_mac(input_share.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+                    }
+
+                    ReluProtocol::<P>::offline_server_cds(
+                        reader_2,
+                        writer_2,
+                        writer_3,
+                        &sfhe,
+                        triples.clone(),
+                        Arc::new(Mutex::new(rands)),
+                        mac_key,
+                        relu_layer_sizes.as_slice(),
+                        output_mac_keys.as_slice(),
+                        output_mac_shares.as_slice(),
+                        input_mac_keys.as_slice(),
+                        input_mac_shares.as_slice(),
+                        labels,
+                        rng_2,
+                    ).unwrap();
+                });
+            });
+        });
+        let gc_state = gc_state.unwrap();
 
         // We no longer need the MACs so unwrap underlying values
         let linear_randomizers = linear_shares
@@ -313,36 +397,34 @@ where
         timer_end!(start_time);
         Ok(ServerState {
             linear_randomizers,
-            relu_encoders,
-            relu_output_randomizers,
+            relu_encoders: gc_state.encoders,
+            relu_output_randomizers: gc_state.output_randomizers,
         })
     }
 
-    pub fn offline_client_protocol<
+    pub fn offline_client_acg<
         R: Read + Send + Unpin,
         W: Write + Send + Unpin,
-        RNG: RngCore + CryptoRng,
+        RNG: CryptoRng + RngCore,
     >(
-        reader: &mut IMuxAsync<R>,
-        writer: &mut IMuxAsync<W>,
+        mut reader: &mut IMuxAsync<R>,
+        mut writer: &mut IMuxAsync<W>,
+        cfhe: &ClientFHE,
         neural_network_architecture: &NeuralArchitecture<AdditiveShare<P>, FixedPoint<P>>,
         rng: &mut RNG,
-    ) -> Result<ClientState<P>, MpcError> {
-        let mut num_relu = 0;
+    ) -> Result<
+        (
+            BTreeMap<usize, Input<AuthAdditiveShare<P::Field>>>,
+            BTreeMap<usize, Output<AuthAdditiveShare<P::Field>>>,
+        ),
+        MpcError,
+    > {
         let mut in_shares = BTreeMap::new();
         let mut out_shares: BTreeMap<usize, Output<AuthAdditiveShare<P::Field>>> = BTreeMap::new();
-        let mut relu_layers = Vec::new();
-        let cfhe: ClientFHE = crate::client_keygen(writer)?;
-
-        let start_time = timer_start!(|| "Client offline phase");
         let linear_time = timer_start!(|| "Linear layers offline phase");
         for (i, layer) in neural_network_architecture.layers.iter().enumerate() {
             match layer {
-                LayerInfo::NLL(dims, NonLinearLayerInfo::ReLU { .. }) => {
-                    relu_layers.push(i);
-                    let (b, c, h, w) = dims.input_dimensions();
-                    num_relu += b * c * h * w;
-                }
+                LayerInfo::NLL(_, NonLinearLayerInfo::ReLU { .. }) => {}
                 LayerInfo::LL(dims, linear_layer_info) => {
                     let input_dims = dims.input_dimensions();
                     let output_dims = dims.output_dimensions();
@@ -416,64 +498,179 @@ where
             }
         }
         timer_end!(linear_time);
-        // Preprocessing for next step with ReLUs; if a ReLU is layer i,
-        // we want to take output shares for the (linear) layer i - 1,
-        // and input shares for the (linear) layer i + 1.
-        let mut output_shares = Vec::new();
-        let mut output_mac_shares = Vec::new();
-        let mut input_rands = Vec::new();
-        let mut input_mac_shares = Vec::new();
-        let mut layer_sizes = Vec::new();
-        let relu_time =
-            timer_start!(|| format!("ReLU layers offline phase with {} ReLUs", num_relu));
-        for &i in &relu_layers {
-            let output_share = out_shares
-                .get(&(i - 1))
-                .expect("should exist because every ReLU should be preceeded by a linear layer");
-            output_shares.extend_from_slice(
-                Input::unwrap_auth_value(output_share.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
-            output_mac_shares.extend_from_slice(
-                Input::unwrap_auth_mac(output_share.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
+        Ok((in_shares, out_shares))
+    }
 
-            let input_rand = in_shares
-                .get(&(i + 1))
-                .expect("should exist because every ReLU should be succeeded by a linear layer");
-            input_rands.extend_from_slice(
-                Input::unwrap_auth_value(input_rand.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
-            input_mac_shares.extend_from_slice(
-                Input::unwrap_auth_mac(input_rand.clone())
-                    .as_slice()
-                    .unwrap(),
-            );
-            // Output and input layers have the same size
-            layer_sizes.push(input_rand.len());
+    pub fn offline_client_protocol<
+        R: Read + Send + Unpin + 'static,
+        W: Write + Send + Unpin + 'static,
+        RNG: RngCore + CryptoRng + Send,
+    >(
+        mut reader: IMuxAsync<R>,
+        mut writer: IMuxAsync<W>,
+        mut reader_2: IMuxAsync<R>,
+        mut writer_2: IMuxAsync<W>,
+        mut reader_3: IMuxAsync<R>,
+        neural_network_architecture: &NeuralArchitecture<AdditiveShare<P>, FixedPoint<P>>,
+        rng: &mut RNG,
+        rng_2: &mut RNG,
+    ) -> Result<ClientState<P>, MpcError> {
+        let cfhe: ClientFHE = crate::client_keygen(&mut writer)?;
+
+        let start_time = timer_start!(|| "Client offline phase");
+
+        // TODO
+        let mut num_relu = 0;
+        let mut relu_layers = Vec::new();
+        let mut relu_layer_sizes = Vec::new();
+        for (i, layer) in neural_network_architecture.layers.iter().enumerate() {
+            match layer {
+                LayerInfo::NLL(dims, NonLinearLayerInfo::ReLU { .. }) => {
+                    relu_layers.push(i);
+                    let (b, c, h, w) = dims.input_dimensions();
+                    let relus = b * c * h * w;
+                    relu_layer_sizes.push(relus);
+                    num_relu += relus;
+                }
+                LayerInfo::LL(dims, linear_layer_info) => {}
+            }
         }
+
+        // TODO
+        let modulus_bits = <P::Field as PrimeField>::size_in_bits();
+        let elems_per_label = (128.0 / (modulus_bits - 1) as f64).ceil() as usize;
+        let (num_rands, num_triples) = CDSProtocol::<P>::num_rands_triples(
+            relu_layer_sizes.len(),
+            num_relu,
+            modulus_bits,
+            elems_per_label,
+        );
+
+        // Generate rands and triples
+        //let gen = InsecureClientOfflineMPC::new(&cfhe);
+        let gen = ClientOfflineMPC::new(&cfhe);
+
+        let mut in_shares = BTreeMap::new();
+        let mut out_shares = BTreeMap::new();
+
+        let triples = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+
+        let mut gc_state = None;
+        let _ = rayon::scope(|s| {
+            s.spawn(|_| {
+                let pool = ThreadPoolBuilder::new().num_threads(6).build().unwrap();
+                pool.install(|| {
+                    // Generate triples in batches
+                    let batch_size = num_triples / 4;
+                    let batches = (num_triples as f64 / batch_size as f64).ceil() as usize;
+                    for i in 0..batches {
+                        let triples_batch_size =
+                            std::cmp::min(batch_size, num_triples - i * batch_size);
+                        let mut triples_batch =
+                            gen.triples_gen(&mut reader, &mut writer, rng, triples_batch_size);
+
+                        // Add the batch to the vector of triples
+                        let mut triples_vec = triples.0.lock().unwrap();
+                        triples_vec.append(&mut triples_batch);
+                        triples.1.notify_all();
+                    }
+                });
+            });
+
+            s.spawn(|_| {
+                let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+                pool.install(|| {
+                    let mut rands = Vec::new();
+                    rayon::scope(|s2| {
+                        // Generate input rands
+                        rands = gen.rands_gen(&mut reader_2, &mut writer_2, rng_2, num_rands);
+
+                        s2.spawn(|_| {
+                            // ACG/Garbling
+                            let result = NNProtocol::offline_client_acg(
+                                &mut reader_2,
+                                &mut writer_2,
+                                &cfhe,
+                                neural_network_architecture,
+                                rng_2,
+                            )
+                            .unwrap();
+                            in_shares = result.0;
+                            out_shares = result.1;
+                        });
+
+                        // TODO
+                        gc_state = Some(
+                            ReluProtocol::<P>::offline_client_garbling(&mut reader_3, num_relu)
+                                .unwrap(),
+                        );
+                    });
+
+                    // Preprocessing for next step with ReLUs; if a ReLU is layer i,
+                    // we want to take output shares for the (linear) layer i - 1,
+                    // and input shares for the (linear) layer i + 1.
+                    let mut output_shares = Vec::new();
+                    let mut output_mac_shares = Vec::new();
+                    let mut input_rands = Vec::new();
+                    let mut input_mac_shares = Vec::new();
+                    for &i in &relu_layers {
+                        let output_share = out_shares.get(&(i - 1)).expect(
+                            "should exist because every ReLU should be preceeded by a linear layer",
+                        );
+                        output_shares.extend_from_slice(
+                            Input::unwrap_auth_value(output_share.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+                        output_mac_shares.extend_from_slice(
+                            Input::unwrap_auth_mac(output_share.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+
+                        let input_rand = in_shares.get(&(i + 1)).expect(
+                            "should exist because every ReLU should be succeeded by a linear layer",
+                        );
+                        input_rands.extend_from_slice(
+                            Input::unwrap_auth_value(input_rand.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+                        input_mac_shares.extend_from_slice(
+                            Input::unwrap_auth_mac(input_rand.clone())
+                                .as_slice()
+                                .unwrap(),
+                        );
+                    }
+
+                    // CDS
+                    let gc_state = gc_state.as_mut().unwrap();
+                    ReluProtocol::<P>::offline_client_cds(
+                        reader_2,
+                        writer_2,
+                        reader_3,
+                        &cfhe,
+                        triples.clone(),
+                        Arc::new(Mutex::new(rands)),
+                        gc_state,
+                        relu_layer_sizes.as_slice(),
+                        output_mac_shares.as_slice(),
+                        output_shares.as_slice(),
+                        input_mac_shares.as_slice(),
+                        input_rands.as_slice(),
+                        rng_2,
+                    )
+                    .unwrap();
+                });
+            });
+        });
+        let mut gc_state = gc_state.unwrap();
 
         let crate::gc::ClientState {
             gc_s: relu_circuits,
             server_randomizer_labels: randomizer_labels,
             client_input_labels: relu_labels,
-        } = ReluProtocol::<P>::offline_client_protocol(
-            reader,
-            writer,
-            num_relu,
-            &cfhe,
-            layer_sizes.as_slice(),
-            output_mac_shares.as_slice(),
-            output_shares.as_slice(),
-            input_mac_shares.as_slice(),
-            input_rands.as_slice(),
-            rng,
-        )?;
+        } = gc_state;
 
         let (relu_client_labels, relu_server_labels) = if num_relu != 0 {
             let size_of_client_input = relu_labels.len() / num_relu;
@@ -498,7 +695,6 @@ where
         } else {
             (vec![], vec![])
         };
-        timer_end!(relu_time);
 
         // We no longer need the MACs so unwrap underlying values
         let linear_randomizers: BTreeMap<_, _> = in_shares

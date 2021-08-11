@@ -6,11 +6,18 @@ use crypto_primitives::{
     additive_share::{AdditiveShare, AuthAdditiveShare, AuthShare, Share},
     beavers_mul::{BeaversMul, BlindedInputs, BlindedSharedInputs, PBeaversMul, Triple},
 };
-use io_utils::imux::IMuxAsync;
+use io_utils::{
+    imux::IMuxAsync,
+    threaded::{ThreadedReader, ThreadedWriter},
+};
 use itertools::izip;
 use num_traits::identities::Zero;
 use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
+use std::{
+    iter::FromIterator,
+    sync::{Arc, Condvar, Mutex, RwLock},
+};
 
 pub struct MpcProtocolType;
 
@@ -77,6 +84,24 @@ pub trait MPC<T: AuthShare, M: BeaversMul<T>>: Send + Sync {
         shares: &[AuthAdditiveShare<T>],
     ) -> Result<Vec<T>, MpcError>;
 
+    /// Note that this implementation is identical to `private_open` except it uses a ThreadedReader/Writer
+    /// instead of IMuxAsync. This is because of some limitations in the interface currently
+    /// exposed by io-utils and will be integrated together in the future
+    fn private_open_t<W: Write + Send + Unpin>(
+        &self,
+        writer: &mut ThreadedWriter<W>,
+        shares: &[AuthAdditiveShare<T>],
+    ) -> Result<(), MpcError>;
+
+    /// Note that this implementation is identical to `private_recv` except it uses a ThreadedReader/Writer
+    /// instead of IMuxAsync. This is because of some limitations in the interface currently
+    /// exposed by io-utils and will be integrated together in the future
+    fn private_recv_t(
+        &mut self,
+        reader: &mut ThreadedReader,
+        shares: &[AuthAdditiveShare<T>],
+    ) -> Result<Vec<T>, MpcError>;
+
     /// Add shares `x` and `y`
     fn add(
         &mut self,
@@ -106,62 +131,6 @@ pub trait MPC<T: AuthShare, M: BeaversMul<T>>: Send + Sync {
         }
         Ok(izip!(x, y).map(|(l, r)| l - r).collect())
     }
-
-    // TODO
-    //    async fn mul<D: EvaluationDomain<F>>(
-    //        &mut self,
-    //        a: Evaluations<F, D>,
-    //        b: Evaluations<F, D>,
-    //    ) -> Result<Evaluations<F, D>, DelegationError> {
-    //        let domain = a.domain().clone();
-    //
-    //        // Consume necessary triples
-    //        let req_triples = a.evals.len();
-    //        let triples = self.get_triples(req_triples)?;
-    //
-    //        // Compute blinded shares using the triples.
-    //        let blinded_shares = a
-    //            .evals
-    //            .into_iter()
-    //            .zip(b.evals.into_iter())
-    //            .zip(triples.iter())
-    //            .map(|((a, b), t)| FBeaversMul::share_and_blind_inputs(&a, &b, t))
-    //            .collect::<Vec<_>>();
-    //
-    //        // Send blinded shares to all parties
-    //        let send_shares_f = self
-    //            .writers
-    //            .iter_mut()
-    //            .map(|w| crate::IO::serialize_write_and_flush(&blinded_shares, w))
-    //            .collect::<FuturesUnordered<_>>()
-    //            .collect::<Vec<_>>();
-    //
-    //        // Receive blinded shares from all parties
-    //        let recv_shares_f = self
-    //            .readers
-    //            .iter_mut()
-    //            .map(|r| crate::IO::read_and_deserialize::<Vec<BlindedSharedInputs<F>>, R>(r))
-    //            .collect::<FuturesUnordered<_>>();
-    //
-    //        // Combine all vectors of shares together
-    //        let blinded_inputs =
-    //            recv_shares_f.fold(Ok(blinded_shares.clone()), |a, b| Self::add_entries(a, b));
-    //
-    //        // Concurrently receive/add shares together and send shares
-    //        let (blinded_inputs, send_shares_f) = join(blinded_inputs, send_shares_f).await;
-    //
-    //        // Unwrap any errors that occured when sending.
-    //        send_shares_f.into_iter().collect::<Result<Vec<_>, _>>()?;
-    //
-    //        // Use blinded_inputs and triples to compute local share
-    //        let result = blinded_inputs?
-    //            .into_iter()
-    //            .zip(triples)
-    //            .map(|(bi, t)| FBeaversMul::multiply_blinded_inputs(self.party_idx, bi.into(), &t))
-    //            .collect();
-    //
-    //        Ok(Evaluations::from_vec_and_domain(result, domain))
-    //    }
 
     /// Multiply shares `x` and `y`
     fn mul<R: Read + Send + Unpin, W: Write + Send + Unpin>(
@@ -204,6 +173,75 @@ pub trait MPC<T: AuthShare, M: BeaversMul<T>>: Send + Sync {
                 for msg_contents in self_blinded_and_shared.chunks(Self::BATCH_SIZE) {
                     let sent_message = MulMsgSend::new(&msg_contents);
                     bytes::serialize(&mut *writer, &sent_message).unwrap();
+                }
+            });
+            // Open blinded shares and perform multiplication
+            for (cur_chunk, other_chunk, triple_chunk) in izip!(
+                self_blinded_and_shared.chunks(Self::BATCH_SIZE),
+                rcv.iter(),
+                triples.chunks(Self::BATCH_SIZE)
+            ) {
+                let result_chunk: Vec<AuthAdditiveShare<T>> = izip!(cur_chunk, other_chunk.iter())
+                    .map(|(cur, other)| BlindedInputs {
+                        blinded_x: (cur.blinded_x + other.blinded_x).get_value().inner,
+                        blinded_y: (cur.blinded_y + other.blinded_y).get_value().inner,
+                    })
+                    .zip(triple_chunk)
+                    .map(|(inp, triple)| M::multiply_blinded_inputs(Self::PARTY_IDX, inp, triple))
+                    .collect();
+                result.extend_from_slice(result_chunk.as_slice());
+            }
+        })
+        .unwrap();
+        Ok(result)
+    }
+
+    /// Multiply shares `x` and `y`
+    ///
+    /// Note that this implementation is identical to `mul` except it uses a ThreadedReader/Writer
+    /// instead of IMuxAsync. This is because of some limitations in the interface currently
+    /// exposed by io-utils and will be integrated together in the future
+    fn mul_t<W: Write + Send + Unpin>(
+        &mut self,
+        reader: &mut ThreadedReader,
+        writer: &mut ThreadedWriter<W>,
+        x: &[AuthAdditiveShare<T>],
+        y: &[AuthAdditiveShare<T>],
+        triples_idx: usize,
+    ) -> Result<Vec<AuthAdditiveShare<T>>, MpcError> {
+        if x.len() != y.len() {
+            return Err(MpcError::MismatchedInputLength {
+                left: x.len(),
+                right: y.len(),
+            });
+        }
+        // Consume necessary triples
+        let triples = self.get_triples_idx(triples_idx, x.len())?;
+
+        // Compute blinded shares using the triples.
+        let self_blinded_and_shared = izip!(x.iter(), y.iter(), triples.iter())
+            .map(|(left, right, t)| M::share_and_blind_inputs(left, right, t))
+            .collect::<Vec<_>>();
+
+        let mut result = Vec::with_capacity(triples.len());
+        let (snd, rcv) = crossbeam::channel::unbounded();
+        crossbeam::scope(|s| {
+            // Receive blinded shares
+            s.spawn(|_| {
+                for _ in self_blinded_and_shared.chunks(Self::BATCH_SIZE) {
+                    let in_msg: MulMsgRcv<_> = bytes::deserialize_t(&mut *reader).unwrap();
+                    let shares = in_msg.msg();
+                    snd.send(shares).unwrap();
+                }
+                // Need to drop the sending channel so the second thread doesn't
+                // block
+                drop(snd);
+            });
+            // Send blinded shares
+            s.spawn(|_| {
+                for msg_contents in self_blinded_and_shared.chunks(Self::BATCH_SIZE) {
+                    let sent_message = MulMsgSend::new(&msg_contents);
+                    bytes::serialize_t(&mut *writer, &sent_message);
                 }
             });
             // Open blinded shares and perform multiplication
@@ -270,45 +308,61 @@ pub trait MPC<T: AuthShare, M: BeaversMul<T>>: Send + Sync {
     /// Returns number of available rands
     fn num_rands(&self) -> usize;
 
-    /// Returns `num` triples if available
+    /// Blocks until `num` triples are available and returns them.
     fn get_triples(&mut self, num: usize) -> Result<Vec<Triple<T>>, MpcError>;
 
-    /// Returns `num` rands if available
+    /// Blocks until `num` rands are available and returns them.
     fn get_rands(&mut self, num: usize) -> Result<Vec<AuthAdditiveShare<T>>, MpcError>;
+
+    fn get_triples_idx(&mut self, idx: usize, num: usize) -> Result<Vec<Triple<T>>, MpcError>;
+
+    fn get_rands_idx(&self, idx: usize, num: usize) -> Result<Vec<AuthAdditiveShare<T>>, MpcError>;
 }
 
 /// Client MPC instance
 pub struct ClientMPC<T: AuthShare> {
-    rands: Vec<AuthAdditiveShare<T>>,
-    triples: Vec<Triple<T>>,
+    rands: Arc<Mutex<Vec<AuthAdditiveShare<T>>>>,
+    triples: Arc<(Mutex<Vec<Triple<T>>>, Condvar)>,
+    idx: Arc<RwLock<usize>>,
 }
 
 /// Server MPC instance
 pub struct ServerMPC<T: AuthShare> {
-    rands: Vec<AuthAdditiveShare<T>>,
-    triples: Vec<Triple<T>>,
+    rands: Arc<Mutex<Vec<AuthAdditiveShare<T>>>>,
+    triples: Arc<(Mutex<Vec<Triple<T>>>, Condvar)>,
     mac_key: <T as Share>::Ring,
     /// Opened auth_shares with unchecked MACs
     unchecked: Vec<AuthAdditiveShare<T>>,
+    idx: Arc<RwLock<usize>>,
 }
 
 impl<P: Fp64Parameters> ClientMPC<Fp64<P>> {
-    pub fn new(rands: Vec<AuthAdditiveShare<Fp64<P>>>, triples: Vec<Triple<Fp64<P>>>) -> Self {
-        Self { rands, triples }
+    pub fn new(
+        rands: Arc<Mutex<Vec<AuthAdditiveShare<Fp64<P>>>>>,
+        triples: Arc<(Mutex<Vec<Triple<Fp64<P>>>>, Condvar)>,
+        idx: Arc<RwLock<usize>>,
+    ) -> Self {
+        Self {
+            rands,
+            triples,
+            idx,
+        }
     }
 }
 
 impl<P: Fp64Parameters> ServerMPC<Fp64<P>> {
     pub fn new(
-        rands: Vec<AuthAdditiveShare<Fp64<P>>>,
-        triples: Vec<Triple<Fp64<P>>>,
+        rands: Arc<Mutex<Vec<AuthAdditiveShare<Fp64<P>>>>>,
+        triples: Arc<(Mutex<Vec<Triple<Fp64<P>>>>, Condvar)>,
         mac_key: <Fp64<P> as Share>::Ring,
+        idx: Arc<RwLock<usize>>,
     ) -> Self {
         Self {
             rands,
             triples,
             mac_key,
             unchecked: Vec::with_capacity(Self::BATCH_SIZE * 100),
+            idx,
         }
     }
 
@@ -373,7 +427,7 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ClientMPC<Fp64<P>> {
     fn recv_private_inputs<R: Read + Send + Unpin, W: Write + Send + Unpin>(
         &mut self,
         reader: &mut IMuxAsync<R>,
-        _writer: &mut IMuxAsync<W>,
+        writer: &mut IMuxAsync<W>,
         num_recv: usize,
     ) -> Result<Vec<AuthAdditiveShare<Fp64<P>>>, MpcError> {
         let mut shares = Vec::with_capacity(num_recv);
@@ -418,6 +472,37 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ClientMPC<Fp64<P>> {
         Ok(result)
     }
 
+    /// To open a share to the server, the client sends full AuthAdditiveShare
+    fn private_open_t<W: Write + Send + Unpin>(
+        &self,
+        writer: &mut ThreadedWriter<W>,
+        shares: &[AuthAdditiveShare<Fp64<P>>],
+    ) -> Result<(), MpcError> {
+        for shares_chunk in shares.chunks(Self::BATCH_SIZE) {
+            let send_message = AuthShareSend::new(shares_chunk);
+            bytes::serialize_t(&mut *writer, &send_message)?;
+        }
+        Ok(())
+    }
+
+    /// To receive a share from the server, the client is given an AdditiveShare
+    /// which it adds to its AuthAdditiveShare
+    fn private_recv_t(
+        &mut self,
+        reader: &mut ThreadedReader,
+        shares: &[AuthAdditiveShare<Fp64<P>>],
+    ) -> Result<Vec<Fp64<P>>, MpcError> {
+        let mut recv_shares = Vec::with_capacity(shares.len());
+        for _ in 0..((shares.len() as f64 / Self::BATCH_SIZE as f64).ceil() as usize) {
+            let recv_message: ShareRcv<Fp64<P>> = bytes::deserialize_t(&mut *reader)?;
+            recv_shares.extend(recv_message.msg());
+        }
+        let result = izip!(shares.iter(), recv_shares.iter())
+            .map(|(s1, s2)| (s1 + s2).get_value().inner)
+            .collect();
+        Ok(result)
+    }
+
     fn public_open<R: Read + Send + Unpin, W: Write + Send + Unpin>(
         &mut self,
         reader: &mut IMuxAsync<R>,
@@ -429,32 +514,86 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ClientMPC<Fp64<P>> {
     }
 
     fn num_triples(&self) -> usize {
-        self.triples.len()
+        self.triples.0.lock().unwrap().len()
     }
 
     fn num_rands(&self) -> usize {
-        self.rands.len()
+        self.rands.lock().unwrap().len()
     }
 
     fn get_triples(&mut self, num: usize) -> Result<Vec<Triple<Fp64<P>>>, MpcError> {
-        if self.triples.len() < num {
-            return Err(MpcError::InsufficientTriples {
-                num: self.triples.len(),
-                needed: num,
-            });
-        }
-        Ok(self.triples.split_off(self.triples.len() - num))
+        // Wait until the lock is free and there are enough triples
+        let (mutex, cvar) = &*self.triples;
+        let mut triples = cvar
+            .wait_while(mutex.lock().unwrap(), |triples| triples.len() < num)
+            .unwrap();
+
+        let cur_length = triples.len();
+        Ok(triples.split_off(cur_length - num))
     }
 
-    /// Returns `num` rands if available
     fn get_rands(&mut self, num: usize) -> Result<Vec<AuthAdditiveShare<Fp64<P>>>, MpcError> {
-        if self.rands.len() < num {
+        let mut rands = self.rands.lock().unwrap();
+        if rands.len() < num {
             return Err(MpcError::InsufficientRand {
-                num: self.rands.len(),
+                num: rands.len(),
                 needed: num,
             });
         }
-        Ok(self.rands.split_off(self.rands.len() - num))
+        let cur_length = rands.len();
+        Ok(rands.split_off(cur_length - num))
+    }
+
+    fn get_triples_idx(
+        &mut self,
+        idx: usize,
+        num: usize,
+    ) -> Result<Vec<Triple<Fp64<P>>>, MpcError> {
+        // Wait until the lock is free and there are enough triples
+        let (mutex, cvar) = &*self.triples;
+        let mut triples = cvar
+            .wait_while(mutex.lock().unwrap(), |triples| {
+                let correct_layer = *self.idx.read().unwrap() == idx;
+                let correct_size = num <= triples.len();
+                println!(
+                    "{} = {}, {} < {} ==> {}",
+                    *self.idx.read().unwrap(),
+                    idx,
+                    triples.len(),
+                    num,
+                    !(correct_layer && correct_size)
+                );
+                !(correct_layer && correct_size)
+            })
+            .unwrap();
+
+        let new_triples = triples.split_off(num);
+        let result = std::mem::replace(&mut *triples, new_triples);
+
+        let mut idx = self.idx.write().unwrap();
+        *idx -= 1;
+
+        drop(idx);
+        drop(triples);
+        cvar.notify_all();
+        println!("DONE");
+
+        Ok(result)
+    }
+
+    fn get_rands_idx(
+        &self,
+        idx: usize,
+        num: usize,
+    ) -> Result<Vec<AuthAdditiveShare<Fp64<P>>>, MpcError> {
+        let mut rands = self.rands.lock().unwrap();
+        if rands.len() < (idx + num) {
+            return Err(MpcError::InsufficientRand {
+                num: rands.len(),
+                needed: num,
+            });
+        }
+        Ok(Vec::from_iter(rands[idx..idx + num].iter().cloned()))
     }
 }
 
@@ -464,7 +603,7 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ServerMPC<Fp64<P>> {
     /// Share `inputs` with the client
     fn private_inputs<R: Read + Send + Unpin, W: Write + Send + Unpin, RNG: RngCore + CryptoRng>(
         &mut self,
-        _reader: &mut IMuxAsync<R>,
+        reader: &mut IMuxAsync<R>,
         writer: &mut IMuxAsync<W>,
         inputs: &[Fp64<P>],
         rng: &mut RNG,
@@ -551,6 +690,44 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ServerMPC<Fp64<P>> {
         Ok(result)
     }
 
+    /// To open a share to the client, the server sends AdditiveShares
+    fn private_open_t<W: Write + Send + Unpin>(
+        &self,
+        writer: &mut ThreadedWriter<W>,
+        shares: &[AuthAdditiveShare<Fp64<P>>],
+    ) -> Result<(), MpcError> {
+        let stripped_shares: Vec<AdditiveShare<Fp64<P>>> =
+            shares.par_iter().map(|e| e.get_value()).collect();
+        for shares in stripped_shares.chunks(Self::BATCH_SIZE) {
+            let send_message = ShareSend::new(shares);
+            bytes::serialize_t(&mut *writer, &send_message)?;
+        }
+        Ok(())
+    }
+
+    /// To receive a share from the client, the server is sent an
+    /// AuthAdditiveShare. It adds the share to `unchecked` and
+    /// eagerly opens value
+    fn private_recv_t(
+        &mut self,
+        reader: &mut ThreadedReader,
+        shares: &[AuthAdditiveShare<Fp64<P>>],
+    ) -> Result<Vec<Fp64<P>>, MpcError> {
+        let mut recv_shares = Vec::with_capacity(shares.len());
+        for _ in 0..((shares.len() as f64 / Self::BATCH_SIZE as f64).ceil() as usize) {
+            let recv_message: AuthShareRcv<Fp64<P>> = bytes::deserialize_t(&mut *reader)?;
+            recv_shares.extend(recv_message.msg());
+        }
+        let result = izip!(shares.iter(), recv_shares.iter())
+            .map(|(s1, s2)| {
+                let result = s1 + s2;
+                self.unchecked.push(result);
+                result.get_value().inner
+            })
+            .collect();
+        Ok(result)
+    }
+
     fn public_open<R: Read + Send + Unpin, W: Write + Send + Unpin>(
         &mut self,
         reader: &mut IMuxAsync<R>,
@@ -563,32 +740,86 @@ impl<P: Fp64Parameters> MPC<Fp64<P>, PBeaversMul<P>> for ServerMPC<Fp64<P>> {
     }
 
     fn num_triples(&self) -> usize {
-        self.triples.len()
+        self.triples.0.lock().unwrap().len()
     }
 
     fn num_rands(&self) -> usize {
-        self.rands.len()
+        self.rands.lock().unwrap().len()
     }
 
     fn get_triples(&mut self, num: usize) -> Result<Vec<Triple<Fp64<P>>>, MpcError> {
-        if self.triples.len() < num {
-            return Err(MpcError::InsufficientTriples {
-                num: self.triples.len(),
-                needed: num,
-            });
-        }
-        Ok(self.triples.split_off(self.triples.len() - num))
+        // Wait until the lock is free and there are enough triples
+        let (mutex, cvar) = &*self.triples;
+        let mut triples = cvar
+            .wait_while(mutex.lock().unwrap(), |triples| triples.len() < num)
+            .unwrap();
+
+        let cur_length = triples.len();
+        Ok(triples.split_off(cur_length - num))
     }
 
-    /// Returns `num` rands if available
     fn get_rands(&mut self, num: usize) -> Result<Vec<AuthAdditiveShare<Fp64<P>>>, MpcError> {
-        if self.rands.len() < num {
+        let mut rands = self.rands.lock().unwrap();
+        if rands.len() < num {
             return Err(MpcError::InsufficientRand {
-                num: self.rands.len(),
+                num: rands.len(),
                 needed: num,
             });
         }
-        Ok(self.rands.split_off(self.rands.len() - num))
+        let cur_length = rands.len();
+        Ok(rands.split_off(cur_length - num))
+    }
+
+    fn get_triples_idx(
+        &mut self,
+        idx: usize,
+        num: usize,
+    ) -> Result<Vec<Triple<Fp64<P>>>, MpcError> {
+        // Wait until the lock is free and there are enough triples
+        let (mutex, cvar) = &*self.triples;
+        let mut triples = cvar
+            .wait_while(mutex.lock().unwrap(), |triples| {
+                let correct_layer = *self.idx.read().unwrap() == idx;
+                let correct_size = num <= triples.len();
+                println!(
+                    "{} = {}, {} < {} ==> {}",
+                    *self.idx.read().unwrap(),
+                    idx,
+                    triples.len(),
+                    num,
+                    !(correct_layer && correct_size)
+                );
+                !(correct_layer && correct_size)
+            })
+            .unwrap();
+
+        let new_triples = triples.split_off(num);
+        let result = std::mem::replace(&mut *triples, new_triples);
+
+        let mut idx = self.idx.write().unwrap();
+        *idx -= 1;
+
+        drop(idx);
+        drop(triples);
+        cvar.notify_all();
+        println!("DONE");
+
+        Ok(result)
+    }
+
+    fn get_rands_idx(
+        &self,
+        idx: usize,
+        num: usize,
+    ) -> Result<Vec<AuthAdditiveShare<Fp64<P>>>, MpcError> {
+        let mut rands = self.rands.lock().unwrap();
+        if rands.len() < (idx + num) {
+            return Err(MpcError::InsufficientRand {
+                num: rands.len(),
+                needed: num,
+            });
+        }
+        Ok(Vec::from_iter(rands[idx..idx + num].iter().cloned()))
     }
 }
 
@@ -602,8 +833,11 @@ mod tests {
         task,
     };
     use crypto_primitives::beavers_mul::InsecureTripleGen;
-    use futures::stream::StreamExt;
-    use io_utils::imux::IMuxAsync;
+    use futures::{
+        stream::{FuturesUnordered, StreamExt},
+        SinkExt,
+    };
+    use io_utils::IMuxAsync;
     use num_traits::identities::Zero;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaChaRng;

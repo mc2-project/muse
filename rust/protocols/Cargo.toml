@@ -3,12 +3,14 @@ name = "protocols"
 version = "0.1.0"
 edition = "2018"
 authors = [
-    "Ryan Lehmkuhl",
     "Pratyush Mishra",
+    "Ryan Lehmkuhl",
     "Akshayaram Srinivasan",
+    "Wenting Zheng",
     "Raluca Ada Popa",
 ]
-description = "Cryptographic protocols used in Muse"
+description = "Cryptographic protocols for linear, ReLU, and quadratic activations used in Delphi"
+repository = "https://github.com/mc2/delphi"
 keywords = ["cryptography", "finite fields", "garbled circuits", "secret sharing", "neural networks"]
 categories = ["cryptography", "machine learning"]
 include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
@@ -23,7 +25,7 @@ ndarray = { version = "0.12", features = [ "serde-1" ] }
 crypto-primitives = { path = "../crypto-primitives" }
 ocelot = { version = "0.3", git = "https://github.com/GaloisInc/ocelot/" }
 scuttlebutt = { version = "0.3", git = "https://github.com/GaloisInc/scuttlebutt/", features = [ "serde" ], tag = "0.3.2" }
-rayon = { version = "1" }
+rayon = { version = "1.5.1" }
 neural-network = { path = "../neural-network" }
 rand = { version = "0.6" }
 bincode = "1.0"
@@ -34,7 +36,7 @@ flume = "0.9.0"
 
 async-std = "1.9.0"
 futures = "0.3.12"
-io-utils = { git = "https://github.com/ryanleh/io-utils", branch = "main" }
+io-utils = { git = "https://github.com/ryanleh/io-utils", branch = "muse-experiments" }
 
 [dev-dependencies]
 rand_chacha = { version = "0.1.1" }

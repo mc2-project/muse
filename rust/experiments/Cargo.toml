@@ -3,12 +3,14 @@ name = "experiments"
 version = "0.1.0"
 edition = "2018"
 authors = [
-    "Ryan Lehmkuhl",
     "Pratyush Mishra",
+    "Ryan Lehmkuhl",
     "Akshayaram Srinivasan",
+    "Wenting Zheng",
     "Raluca Ada Popa",
 ]
-description = "Experiments from the Muse paper"
+description = "Experiments from the Delphi paper"
+repository = "https://github.com/mc2/delphi"
 keywords = ["cryptography", "finite fields", "garbled circuits", "secret sharing"]
 categories = ["cryptography"]
 include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
@@ -34,12 +36,28 @@ clap = "2.33.3"
 
 async-std = "1.9.0"
 futures = "0.3.12"
-io-utils = { git = "https://github.com/ryanleh/io-utils", branch = "main" }
+io-utils = { git = "https://github.com/ryanleh/io-utils", branch = "muse-experiments" }
 
 [lib]
 name = "experiments"
 path = "src/lib.rs"
 
+#[[bin]]
+#name = "minionn-inference"
+#path = "src/inference/minionn/inference.rs"
+#
+#[[bin]]
+#name = "minionn-accuracy"
+#path = "src/validation/minionn/validate.rs"
+#
+#[[bin]]
+#name = "resnet32-client"
+#path = "src/latency/resnet32/client.rs"
+#
+#[[bin]]
+#name = "resnet32-server"
+#path = "src/latency/resnet32/server.rs"
+#
 [[bin]]
 name = "minionn-client"
 path = "src/latency/minionn/client.rs"
@@ -55,7 +73,15 @@ path = "src/latency/mnist/client.rs"
 [[bin]]
 name = "mnist-server"
 path = "src/latency/mnist/server.rs"
-
+#
+#[[bin]]
+#name = "tput-client"
+#path = "src/throughput/linear_only/client.rs"
+#
+#[[bin]]
+#name = "tput-server"
+#path = "src/throughput/linear_only/server.rs"
+#
 [[bin]]
 name = "triples-gen-server"
 path = "src/latency/triples_gen/server.rs"

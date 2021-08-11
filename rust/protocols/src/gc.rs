@@ -6,6 +6,7 @@ use algebra::{
     BigInteger64, FpParameters, UniformRandom,
 };
 use crypto_primitives::{
+    beavers_mul::Triple,
     gc::{
         fancy_garbling,
         fancy_garbling::{
@@ -13,7 +14,7 @@ use crypto_primitives::{
             Encoder, GarbledCircuit, Wire,
         },
     },
-    AuthShare, Share,
+    AuthAdditiveShare, AuthShare, Share,
 };
 use io_utils::imux::IMuxAsync;
 use itertools::interleave;
@@ -21,7 +22,10 @@ use protocols_sys::{ClientFHE, ServerFHE};
 use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
 use scuttlebutt::Block;
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Condvar, Mutex},
+};
 
 use async_std::io::{Read, Write};
 
@@ -97,35 +101,98 @@ where
         make_relu::<P>().num_evaluator_inputs()
     }
 
-    pub fn offline_server_protocol<
-        R: Read + Send + Unpin,
-        W: Write + Send + Unpin,
+    pub fn offline_server_cds<
+        R: Read + Send + Unpin + 'static,
+        W: Write + Send + Unpin + 'static,
         RNG: CryptoRng + RngCore,
     >(
-        reader: &mut IMuxAsync<R>,
+        mut reader: IMuxAsync<R>,
+        mut writer: IMuxAsync<W>,
+        mut writer_2: IMuxAsync<W>,
+        sfhe: &ServerFHE,
+        triples: Arc<(Mutex<Vec<Triple<P::Field>>>, Condvar)>,
+        rands: Arc<Mutex<Vec<AuthAdditiveShare<P::Field>>>>,
+        mac_key: P::Field,
+        layer_sizes: &[usize],
+        output_mac_keys: &[P::Field],
+        output_mac_shares: &[P::Field],
+        input_mac_keys: &[P::Field],
+        input_mac_shares: &[P::Field],
+        labels: Vec<(Block, Block)>,
+        rng: &mut RNG,
+    ) -> Result<(), MpcError> {
+        // Extract out the zero labels for the carry bits since these aren't
+        // used in CDS
+        let (carry_labels, input_labels): (Vec<_>, Vec<_>) = labels
+            .into_iter()
+            .enumerate()
+            .partition(|(i, _)| (i + 1) % (P::Field::size_in_bits() + 1) == 0);
+
+        let carry_labels: Vec<Wire> = carry_labels
+            .into_iter()
+            .map(|(_, (zero, _))| Wire::from_block(zero, 2))
+            .collect();
+        let input_labels: Vec<(Block, Block)> = input_labels.into_iter().map(|(_, l)| l).collect();
+
+        let cds_time = timer_start!(|| "CDS Protocol");
+        cds::CDSProtocol::<P>::server_cds(
+            reader,
+            writer,
+            sfhe,
+            triples,
+            rands,
+            mac_key,
+            layer_sizes,
+            output_mac_keys,
+            output_mac_shares,
+            input_mac_keys,
+            input_mac_shares,
+            input_labels.as_slice(),
+            rng,
+        )?;
+        timer_end!(cds_time);
+
+        // Send carry labels to client
+        let send_time = timer_start!(|| "Sending carry labels");
+        let tmp = vec![carry_labels];
+        let send_message = ServerLabelMsgSend::new(&tmp);
+        bytes::serialize(&mut writer_2, &send_message)?;
+
+        timer_end!(send_time);
+
+        // TODO
+        layer_sizes.iter().for_each(|n| {
+            for i in 0..100 {
+                println!(
+                    "{} --> 0: {:?}, 1: {:?}",
+                    n + i,
+                    input_labels[n + i].0,
+                    input_labels[n + i].1
+                )
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn offline_server_garbling<W: Write + Send + Unpin, RNG: CryptoRng + RngCore>(
         writer: &mut IMuxAsync<W>,
         number_of_relus: usize,
         sfhe: &ServerFHE,
         layer_sizes: &[usize],
-        output_mac_keys: &[P::Field],
-        output_mac_shares: &[P::Field],
         output_truncations: &[u8],
-        input_mac_keys: &[P::Field],
-        input_mac_shares: &[P::Field],
         rng: &mut RNG,
-    ) -> Result<ServerState<P>, MpcError> {
-        let start_time = timer_start!(|| "ReLU offline protocol");
+    ) -> Result<(ServerState<P>, Vec<(Block, Block)>), MpcError> {
+        let garble_time = timer_start!(|| "Garbling");
 
         let mut gc_s = Vec::with_capacity(number_of_relus);
         let mut encoders = Vec::with_capacity(number_of_relus);
         let p = (<<P::Field as PrimeField>::Params>::MODULUS.0).into();
 
-        // let c = make_relu::<P>();
         assert_eq!(
             number_of_relus,
             layer_sizes.iter().fold(0, |sum, &x| sum + x)
         );
-        let garble_time = timer_start!(|| "Garbling");
 
         // For each layer, garbled a circuit with the correct number of truncations
         for (i, num) in layer_sizes.iter().enumerate() {
@@ -184,20 +251,9 @@ where
                 });
         }
 
-        // Extract out the zero labels for the carry bits since these aren't
-        // used in CDS
-        let (carry_labels, input_labels): (Vec<_>, Vec<_>) = labels
-            .into_iter()
-            .enumerate()
-            .partition(|(i, _)| (i + 1) % (P::Field::size_in_bits() + 1) == 0);
-
-        let carry_labels: Vec<Wire> = carry_labels
-            .into_iter()
-            .map(|(_, (zero, _))| Wire::from_block(zero, 2))
-            .collect();
-        let input_labels: Vec<(Block, Block)> = input_labels.into_iter().map(|(_, l)| l).collect();
         timer_end!(encode_time);
 
+        // TODO: For full security need to OTP the GC with a hash key
         let send_gc_time = timer_start!(|| "Sending GCs");
         let randomizer_label_per_relu = if number_of_relus == 0 {
             8192
@@ -213,54 +269,80 @@ where
         }
         timer_end!(send_gc_time);
 
-        let cds_time = timer_start!(|| "CDS Protocol");
-        if number_of_relus > 0 {
-            cds::CDSProtocol::<P>::server_cds(
-                reader,
-                writer,
-                sfhe,
-                layer_sizes,
-                output_mac_keys,
-                output_mac_shares,
-                input_mac_keys,
-                input_mac_shares,
-                input_labels.as_slice(),
-                rng,
-            )?;
-        }
-        timer_end!(cds_time);
-
-        // Send carry labels to client
-        let send_time = timer_start!(|| "Sending carry labels");
-        let tmp = vec![carry_labels];
-        let send_message = ServerLabelMsgSend::new(&tmp);
-        bytes::serialize(writer, &send_message)?;
-
-        timer_end!(send_time);
-        timer_end!(start_time);
-        Ok(ServerState {
-            encoders,
-            output_randomizers,
-        })
+        Ok((
+            ServerState {
+                encoders,
+                output_randomizers,
+            },
+            labels,
+        ))
     }
 
-    pub fn offline_client_protocol<
-        R: Read + Send + Unpin,
-        W: Write + Send + Unpin,
+    pub fn offline_client_cds<
+        R: Read + Send + Unpin + 'static,
+        W: Write + Send + Unpin + 'static,
         RNG: CryptoRng + RngCore,
     >(
-        reader: &mut IMuxAsync<R>,
-        writer: &mut IMuxAsync<W>,
-        number_of_relus: usize,
+        mut reader: IMuxAsync<R>,
+        mut writer: IMuxAsync<W>,
+        mut reader_2: IMuxAsync<R>,
         cfhe: &ClientFHE,
+        triples: Arc<(Mutex<Vec<Triple<P::Field>>>, Condvar)>,
+        rands: Arc<Mutex<Vec<AuthAdditiveShare<P::Field>>>>,
+        state: &mut ClientState,
         layer_sizes: &[usize],
         output_mac_shares: &[P::Field],
         output_shares: &[P::Field],
         input_mac_shares: &[P::Field],
         input_rands: &[P::Field],
         rng: &mut RNG,
+    ) -> Result<(), MpcError> {
+        let cds_time = timer_start!(|| "CDS Protocol");
+        let labels = cds::CDSProtocol::<P>::client_cds(
+            reader,
+            writer,
+            cfhe,
+            triples,
+            rands,
+            layer_sizes,
+            output_mac_shares,
+            output_shares,
+            input_mac_shares,
+            input_rands,
+            rng,
+        )?;
+        timer_end!(cds_time);
+
+        layer_sizes.iter().for_each(|n| {
+            for i in 0..100 {
+                println!("{} --> {:?}", n + i, labels[n + i])
+            }
+        });
+
+        // Receive carry labels
+        let recv_time = timer_start!(|| "Receiving carry labels");
+        let recv_msg: ClientLabelMsgRcv = bytes::deserialize(&mut reader_2)?;
+        let carry_labels: Vec<Wire> = recv_msg.msg().remove(0);
+        // Interleave received labels with carry labels
+        let labels = interleave(
+            labels.chunks(P::Field::size_in_bits()),
+            carry_labels.chunks(1),
+        )
+        .flatten()
+        .cloned()
+        .collect();
+        timer_end!(recv_time);
+
+        // TODO
+
+        state.client_input_labels = labels;
+        Ok(())
+    }
+
+    pub fn offline_client_garbling<R: Read + Send + Unpin>(
+        reader: &mut IMuxAsync<R>,
+        number_of_relus: usize,
     ) -> Result<ClientState, MpcError> {
-        let start_time = timer_start!(|| "ReLU offline protocol");
         let rcv_gc_time = timer_start!(|| "Receiving GCs");
         let mut gc_s = Vec::with_capacity(number_of_relus);
         let mut r_wires = Vec::with_capacity(number_of_relus);
@@ -276,48 +358,12 @@ where
             r_wires.extend(r_wire_chunks);
         }
         timer_end!(rcv_gc_time);
-
         assert_eq!(gc_s.len(), number_of_relus);
-
-        let cds_time = timer_start!(|| "CDS Protocol");
-        let labels = if number_of_relus > 0 {
-            cds::CDSProtocol::<P>::client_cds(
-                reader,
-                writer,
-                cfhe,
-                layer_sizes,
-                output_mac_shares,
-                output_shares,
-                input_mac_shares,
-                input_rands,
-                rng,
-            )?
-        } else {
-            Vec::new()
-        };
-        timer_end!(cds_time);
-
-        // Receive carry labels
-        let recv_time = timer_start!(|| "Receiving carry labels");
-
-        let recv_msg: ClientLabelMsgRcv = bytes::deserialize(reader)?;
-        let carry_labels: Vec<Wire> = recv_msg.msg().remove(0);
-
-        // Interleave received labels with carry labels
-        let labels = interleave(
-            labels.chunks(P::Field::size_in_bits()),
-            carry_labels.chunks(1),
-        )
-        .flatten()
-        .cloned()
-        .collect();
-        timer_end!(recv_time);
-        timer_end!(start_time);
 
         Ok(ClientState {
             gc_s,
             server_randomizer_labels: r_wires,
-            client_input_labels: labels,
+            client_input_labels: Vec::new(),
         })
     }
 
