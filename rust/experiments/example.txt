@@ -1,0 +1,193 @@
+Layer dim: (1, 1, 28, 28)
+Layer dim: (1, 16, 24, 24)
+Layer dim: (1, 16, 24, 24)
+Layer dim: (1, 16, 12, 12)
+Layer dim: (1, 16, 8, 8)
+Layer dim: (1, 16, 8, 8)
+Layer dim: (1, 16, 4, 4)
+Layer dim: (1, 100, 1, 1)
+Layer dim: (1, 100, 1, 1)
+Start:   Receiving keys
+End:     Receiving keys.............................................................1.249s
+Start:   Server offline phase
+··Start:   Linear layers offline phase
+····Start:   Server linear offline protocol
+······Start:   Preprocessing
+······End:     Preprocessing........................................................5.192ms
+······Start:   Receiving Input
+······End:     Receiving Input......................................................104.956ms
+······Start:   Processing Layer
+······End:     Processing Layer.....................................................1.573s
+······Start:   Sending result
+······End:     Sending result.......................................................7.716ms
+····End:     Server linear offline protocol.........................................1.691s
+····Start:   Linear offline protocol
+······Start:   Receiving Input
+······End:     Receiving Input......................................................50.71ms
+······Start:   Sending Result
+······End:     Sending Result.......................................................5.100ms
+····End:     Linear offline protocol................................................61.203ms
+····Start:   Server linear offline protocol
+······Start:   Preprocessing
+······End:     Preprocessing........................................................2.852ms
+······Start:   Receiving Input
+······End:     Receiving Input......................................................198.512ms
+······Start:   Processing Layer
+······End:     Processing Layer.....................................................1.599s
+······Start:   Sending result
+······End:     Sending result.......................................................4.369ms
+····End:     Server linear offline protocol.........................................1.804s
+····Start:   Linear offline protocol
+······Start:   Receiving Input
+······End:     Receiving Input......................................................24.576ms
+······Start:   Sending Result
+······End:     Sending Result.......................................................2.74ms
+····End:     Linear offline protocol................................................31.124ms
+····Start:   Server linear offline protocol
+······Start:   Preprocessing
+······End:     Preprocessing........................................................3.361ms
+······Start:   Receiving Input
+······End:     Receiving Input......................................................25.673ms
+······Start:   Processing Layer
+······End:     Processing Layer.....................................................105.113ms
+······Start:   Sending result
+······End:     Sending result.......................................................7.653ms
+····End:     Server linear offline protocol.........................................142.10ms
+····Start:   Server linear offline protocol
+······Start:   Preprocessing
+······End:     Preprocessing........................................................3.816ms
+······Start:   Receiving Input
+······End:     Receiving Input......................................................25.925ms
+······Start:   Processing Layer
+······End:     Processing Layer.....................................................59.204ms
+······Start:   Sending result
+······End:     Sending result.......................................................6.987ms
+····End:     Server linear offline protocol.........................................96.97ms
+··End:     Linear layers offline phase..............................................4.118s
+··Start:   ReLU layers offline phase with 10340 ReLUs
+····Start:   ReLU offline protocol
+······Start:   Garbling
+······End:     Garbling.............................................................1.79s
+······Start:   Encoding inputs
+······End:     Encoding inputs......................................................162.848ms
+······Start:   Sending GCs
+······End:     Sending GCs..........................................................695.205ms
+······Start:   CDS Protocol
+········Start:   Insecure Server pairwise randomness generation
+········End:     Insecure Server pairwise randomness generation.....................827.192ms
+········Start:   Insecure Server triples generation
+········End:     Insecure Server triples generation.................................1.421s
+········Start:   Server sharing inputs
+········End:     Server sharing inputs..............................................536.250ms
+········Start:   Server receiving inputs
+········End:     Server receiving inputs............................................79.220ms
+········Start:   Server layer CDS subcircuit
+··········Start:   Secret sharing GC labels
+··········End:     Secret sharing GC labels.........................................489.362ms
+··········Start:   Reconstructing Client input
+··········End:     Reconstructing Client input......................................17.612ms
+··········Start:   Computing rhos
+··········End:     Computing rhos...................................................2.144ms
+··········Start:   Computing sigmas
+··········End:     Computing sigmas.................................................83.131µs
+··········Start:   Server receiving rho
+··········End:     Server receiving rho.............................................7.344µs
+··········Start:   Server receiving sigma
+··········End:     Server receiving sigma...........................................40.514ms
+··········Start:   Server sending label shares
+··········End:     Server sending label shares......................................22.471ms
+········End:     Server layer CDS subcircuit........................................593.360ms
+········Start:   Server layer CDS subcircuit
+··········Start:   Secret sharing GC labels
+··········End:     Secret sharing GC labels.........................................914.294ms
+··········Start:   Reconstructing Client input
+··········End:     Reconstructing Client input......................................4.59ms
+··········Start:   Computing rhos
+··········End:     Computing rhos...................................................699.542µs
+··········Start:   Computing sigmas
+··········End:     Computing sigmas.................................................14.42µs
+··········Start:   Server receiving rho
+··········End:     Server receiving rho.............................................928.967µs
+··········Start:   Server receiving sigma
+··········End:     Server receiving sigma...........................................46.194ms
+··········Start:   Server sending label shares
+··········End:     Server sending label shares......................................3.304ms
+········End:     Server layer CDS subcircuit........................................969.853ms
+········Start:   Server layer CDS subcircuit
+··········Start:   Secret sharing GC labels
+··········End:     Secret sharing GC labels.........................................149.977ms
+··········Start:   Reconstructing Client input
+··········End:     Reconstructing Client input......................................728.969µs
+··········Start:   Computing rhos
+··········End:     Computing rhos...................................................180.418µs
+··········Start:   Computing sigmas
+··········End:     Computing sigmas.................................................1.436µs
+··········Start:   Server receiving rho
+··········End:     Server receiving rho.............................................30.211µs
+··········Start:   Server receiving sigma
+··········End:     Server receiving sigma...........................................4.637µs
+··········Start:   Server sending label shares
+··········End:     Server sending label shares......................................331.322µs
+········End:     Server layer CDS subcircuit........................................151.398ms
+······End:     CDS Protocol.........................................................5.570s
+······Start:   Sending carry labels
+······End:     Sending carry labels.................................................505.114µs
+····End:     ReLU offline protocol..................................................7.509s
+··End:     ReLU layers offline phase with 10340 ReLUs...............................7.521s
+End:     Server offline phase.......................................................11.640s
+Start:   Server online phase
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................63.630ms
+··End:     Linear layer.............................................................63.702ms
+··Start:   ReLU layer
+····Start:   ReLU online protocol
+······Start:   Encoding inputs
+······End:     Encoding inputs......................................................26.832ms
+······Start:   Sending inputs
+······End:     Sending inputs.......................................................157ns
+······Start:   Receiving shares
+······End:     Receiving shares.....................................................527.522ms
+····End:     ReLU online protocol...................................................577.765ms
+··End:     ReLU layer...............................................................579.124ms
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................112.982µs
+··End:     Linear layer.............................................................161.60µs
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................12.693ms
+··End:     Linear layer.............................................................12.734ms
+··Start:   ReLU layer
+····Start:   ReLU online protocol
+······Start:   Encoding inputs
+······End:     Encoding inputs......................................................2.931ms
+······Start:   Sending inputs
+······End:     Sending inputs.......................................................279ns
+······Start:   Receiving shares
+······End:     Receiving shares.....................................................99.391ms
+····End:     ReLU online protocol...................................................103.555ms
+··End:     ReLU layer...............................................................103.746ms
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................17.897µs
+··End:     Linear layer.............................................................30.675µs
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................343.695µs
+··End:     Linear layer.............................................................364.685µs
+··Start:   ReLU layer
+····Start:   ReLU online protocol
+······Start:   Encoding inputs
+······End:     Encoding inputs......................................................279.817µs
+······Start:   Sending inputs
+······End:     Sending inputs.......................................................314ns
+······Start:   Receiving shares
+······End:     Receiving shares.....................................................7.664ms
+····End:     ReLU online protocol...................................................8.330ms
+··End:     ReLU layer...............................................................8.372ms
+··Start:   Linear layer
+····Start:   Linear online protocol
+····End:     Linear online protocol.................................................39.117µs
+··End:     Linear layer.............................................................55.492µs
+End:     Server online phase........................................................768.398ms

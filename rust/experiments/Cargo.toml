@@ -1,0 +1,108 @@
+[package]
+name = "experiments"
+version = "0.1.0"
+edition = "2018"
+authors = [
+    "Ryan Lehmkuhl",
+    "Pratyush Mishra",
+    "Akshayaram Srinivasan",
+    "Raluca Ada Popa",
+]
+description = "Experiments from the Muse paper"
+keywords = ["cryptography", "finite fields", "garbled circuits", "secret sharing"]
+categories = ["cryptography"]
+include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+license = "MIT/Apache-2.0"
+
+[dependencies]
+algebra = { path = "../algebra" }
+bench-utils = {path = "../bench-utils"}
+crypto-primitives = { path = "../crypto-primitives" }
+neural-network = { path = "../neural-network" }
+protocols = { path = "../protocols" }
+protocols-sys = { path = "../protocols-sys" }
+rand = { version = "0.6" }
+rand_chacha = { version = "0.1.1" }
+crossbeam = "0.7.1"
+tch = { version = "0.1.3" }
+rayon = {version = "1.0"}
+num_cpus = { version = "1.11.1" }
+num-traits = { version = "0.2.6"}
+scuttlebutt = { version = "0.3", git = "https://github.com/GaloisInc/scuttlebutt/", features = [ "serde" ], tag = "0.3.2" }
+fancy-garbling = { version = "0.3", git = "https://github.com/pratyush/fancy-garbling/", branch = "add-serde", features = [ "serde1" ] }
+clap = "2.33.3"
+
+async-std = "1.9.0"
+futures = "0.3.12"
+io-utils = { git = "https://github.com/ryanleh/io-utils", branch = "main" }
+
+[lib]
+name = "experiments"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minionn-client"
+path = "src/latency/minionn/client.rs"
+
+[[bin]]
+name = "minionn-server"
+path = "src/latency/minionn/server.rs"
+
+[[bin]]
+name = "mnist-client"
+path = "src/latency/mnist/client.rs"
+
+[[bin]]
+name = "mnist-server"
+path = "src/latency/mnist/server.rs"
+
+[[bin]]
+name = "triples-gen-server"
+path = "src/latency/triples_gen/server.rs"
+
+[[bin]]
+name = "triples-gen-client"
+path = "src/latency/triples_gen/client.rs"
+
+[[bin]]
+name = "cds-server"
+path = "src/latency/cds/server.rs"
+
+[[bin]]
+name = "cds-client"
+path = "src/latency/cds/client.rs"
+
+[[bin]]
+name = "input-auth-server"
+path = "src/latency/input_auth/server.rs"
+
+[[bin]]
+name = "input-auth-client"
+path = "src/latency/input_auth/client.rs"
+
+#[[bin]]
+#name = "input-auth-ltme-server"
+#path = "src/latency/input_auth_ltme/server.rs"
+#
+#[[bin]]
+#name = "input-auth-ltme-client"
+#path = "src/latency/input_auth_ltme/client.rs"
+
+[[bin]]
+name = "acg-server"
+path = "src/latency/acg/server.rs"
+
+[[bin]]
+name = "acg-client"
+path = "src/latency/acg/client.rs"
+
+[[bin]]
+name = "garbling-server"
+path = "src/latency/garbling/server.rs"
+
+[[bin]]
+name = "garbling-client"
+path = "src/latency/garbling/client.rs"
+
+[features]
+timer = ["protocols/timer"]

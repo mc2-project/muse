@@ -1,0 +1,150 @@
+import time
+from math import ceil
+from random import randrange
+
+# Metadata
+#prime = 2061584302081
+prime = 67043329
+#prime = 7
+field_size = len(bin(prime).lstrip('-0b'))
+
+layer_size = 100000
+input_bits_size = 2*layer_size*field_size
+repeat = ceil(128.0 / field_size)
+
+# Helpers
+def sample():
+    return randrange(prime)
+
+def sample_vec(size):
+    return [randrange(prime) for _ in range(size)]
+
+def share(arr):
+    mask = sample_vec(len(arr))
+    share = [(a - m) % prime for a, m in zip(arr, mask)]
+    return mask, share
+
+def to_bits(l, l_bits):
+    bit_repr = '{0:0%db}' % (field_size)
+    for num in l:
+        num_bits = [int(c) for c in bit_repr.format(num)]
+        for bit in reversed(num_bits):
+            l_bits.append(bit)
+
+def reconstruct_bits(bits):
+    """Converts client's bit shares into vectorized integer shares"""
+    # Store vectorized bits into Array to allow for indexing
+    pow_two = Array.create_from([cint(1 << i) for i in range(field_size)])
+    r = sint.Array(layer_size)
+    y = sint.Array(layer_size)
+     
+    @for_range_opt(layer_size)
+    def _(i):
+        offset = layer_size*field_size
+        r_slice = sint.Array(field_size)
+        y_slice = sint.Array(field_size)
+        # Load bits for element into local array
+        @for_range_opt(field_size)
+        def _(j):
+            r_slice[j] = sint.load_mem(bits.address + i*field_size + j)
+            y_slice[j] = sint.load_mem(bits.address + offset + i*field_size + j)
+        # Multiply each bit by appropiate power of two
+        for bit in range(field_size):
+            r_slice[bit] *= pow_two[bit]
+            y_slice[bit] *= pow_two[bit]
+        # Sum all bits into result
+        r[i] = sum(r_slice)
+        y[i] = sum(y_slice)
+    return r, y
+
+a = sample()
+b = sample()
+
+Mr = sample_vec(layer_size)
+r = sample_vec(layer_size)
+
+c_y, s_y = share(Mr)
+
+# Need `repeat` elements to represent a label
+inp_labels_0 = [sample_vec(input_bits_size) for _ in range(repeat)]
+inp_labels_1 = [sample_vec(input_bits_size) for _ in range(repeat)]
+
+## Compute MACs
+br = [(b * e) % prime for e in r]
+ay = [(a * e) % prime for e in c_y]
+
+# Share MACs
+c_ay, s_ay = share(ay)
+c_br, s_br = share(br)
+
+## Decompose client input to bits
+c_y_bits = list()
+to_bits(c_y, c_y_bits)
+r_bits = list()
+to_bits(r, r_bits)
+
+inp_bits = r_bits + c_y_bits
+
+
+# Derive client input size and layer size
+a = sint(a)
+b = sint(b)
+labels_0 = sint.Matrix(input_bits_size, repeat)
+labels_1 = sint.Matrix(input_bits_size, repeat)
+
+for i in range(repeat):
+    tmp = Array.create_from(map(sint, inp_labels_0[i]))
+    labels_0.set_column(i, tmp.get_vector())
+    
+    tmp = Array.create_from(map(sint, inp_labels_1[i]))
+    labels_1.set_column(i, tmp.get_vector())
+
+bits = Array.create_from(map(sint, inp_bits))
+c_ay = Array.create_from(map(sint, c_ay))
+c_br = Array.create_from(map(sint, c_br))
+
+# Exchange shares of GC labels
+g = sint.Matrix(input_bits_size, repeat)
+@for_range_opt(input_bits_size)
+def _(i):
+    @for_range_opt(repeat)
+    def _(j):
+        g[i][j] = labels_0[i][j] - (labels_0[i][j] - labels_1[i][j]) * bits[i]
+
+#print_ln("%s %s", inp_labels_0, inp_labels_1)
+#for i in range(input_bits_size):
+#    print_ln("%s %s", labels_0[i].reveal(), labels_1[i].reveal())
+#print_ln("%s", bits.reveal());
+#for i in range(input_bits_size):
+#    print_ln("%s", g[i].reveal())
+
+
+## Reconstruct client's M_i r_i - s_i and r_i+1 from committed bits
+rec_r, rec_c_y = reconstruct_bits(bits)
+
+ay_prime = sint.Array(layer_size)
+br_prime = sint.Array(layer_size)
+# Compute multiplications
+tmp1 = b * rec_r
+tmp2 = a * rec_c_y
+tmp1.store_in_mem(br_prime.address)
+tmp2.store_in_mem(ay_prime.address)
+
+@for_range_opt(layer_size)
+def _(i):
+    (ay_prime[i] - c_ay[i]).reveal_to(0)
+    (br_prime[i] - c_br[i]).reveal_to(0)
+
+### Check multiplications were correct
+#print_ln("%s", ay_prime.reveal())
+#print_ln("%s", ay)
+#print_ln("%s", br_prime.reveal())
+#print_ln("%s", br)
+
+# Check label shares are correct
+#for i in range(repeat):
+#    for j in range(input_bits_size):
+#        correct = (inp_labels_0[i][j], inp_labels_1[i][j])[inp_bits[j]]
+#        @if_(cint(correct) != g[j][i].reveal())
+#        def _():
+#            print_ln("IDX %s incorrect", i)

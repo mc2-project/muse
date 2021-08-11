@@ -1,0 +1,162 @@
+from Compiler.floatingpoint import SolvedBits
+import time
+
+MAX_LENGTH = 8192
+layers = [300000]
+field_size = len(bin(program.P).lstrip('-0b'))
+
+def get_vec(player, channel, lengths):
+    """Player reads sum(lengths) elements from channel into vectors""" 
+    return [sint.get_private_input_from(player, channel, size=length) for
+            length in lengths]
+
+
+def get_lengths(size):
+    """Returns list of vector lengths < MAX_LENGTH which cover [0, size]"""
+    lengths = [MAX_LENGTH] * (size//MAX_LENGTH)
+    remainder = size % MAX_LENGTH
+    if remainder:
+        lengths.append(remainder)
+    return lengths
+
+
+class Server_Connection:
+    def __init__(self, layer_num, layer_size, input_bits_size):
+        self.channel = layer_num
+        self.layer_size = layer_size
+        # Each connection instance is associated with a channel
+        open_channel_with_return(self.channel)
+        # Get MAC values and vectorize
+        layer_lengths = get_lengths(layer_size)
+        self.a = self._get_mac_vector(layer_lengths)
+        self.b = self._get_mac_vector(layer_lengths)
+        # Get GC labels
+        bits_lengths = get_lengths(input_bits_size)
+        self.zero_labels = self._get(bits_lengths)
+        self.one_labels = self._get(bits_lengths)
+
+    def _get_mac_vector(self, layer_lengths):
+        """Reads MAC value and copies into an array for vectorization"""
+        mac = self._get([1])[0]
+        # Temporary Array containers to allow for indexed copying
+        tmp_arrays = [sint.Array(length) for length in layer_lengths]
+        mac_vecs = [None] * len(layer_lengths)
+        for i, length in enumerate(layer_lengths):
+            for j in range(length):
+                mac.store_in_mem(tmp_arrays[i].address + j)
+            mac_vecs[i] = sint.load_mem(tmp_arrays[i].address, size=length)
+        return mac_vecs
+       
+    def _get(self, lengths):
+        """Read vectorized input from channel"""
+        return get_vec(0, self.channel, lengths)
+    
+    def __del__(self):
+        close_channel(self.channel)
+
+
+class Client_Connection:
+    def __init__(self, layer_num, layer_size, input_bits_size):
+        # TODO: This should just be layer_num
+        self.channel = layer_num+1
+        self.layer_size = layer_size
+        self.input_bits_size = input_bits_size
+        self.layer_lengths = get_lengths(layer_size)
+        self.bits_lengths = get_lengths(input_bits_size)
+        # Each connection instance is associated with a channel
+        open_channel_with_return(self.channel)
+        # Get bit decomposition of input
+        self.bits = self._get(self.bits_lengths)
+        # Get MAC shares
+        self.ay = self._get(self.layer_lengths)
+        self.br = self._get(self.layer_lengths)
+
+    def _get(self, lengths):
+        """Read vertorized input from channel"""
+        return get_vec(1, self.channel, lengths)
+
+    def reconstruct_bits(self):
+        """Converts client's bit shares into vectorized integer shares"""
+        # Store vectorized bits into Array to allow for indexing
+        bits = sint.Array(self.input_bits_size)
+        offset = 0
+        for bits_vec in self.bits:
+            bits_vec.store_in_mem(bits.address + offset)
+            offset += len(bits_vec)
+        # Create temporary Array containers for integer shares
+        y = [sint.Array(length) for length in self.layer_lengths]
+        r = [sint.Array(length) for length in self.layer_lengths]
+        for i, length in enumerate(self.layer_lengths):
+            # This is run a ton of times, so to help compilation use the
+            # SCALE-MAMBA Loop
+            @for_range(length)
+            def loop_body(elem):
+                A = sint.Array(field_size)
+                for j in range(field_size):
+                    A[j] = sint.load_mem(bits.address + i*MAX_LENGTH*field_size + elem*field_size + j, size=1)
+                
+                y[i][elem] = SolvedBits(A, field_size)
+
+                for j in range(field_size):
+                    A[j] = sint.load_mem(bits.address + i*MAX_LENGTH*field_size + elem*field_size + layer_size*field_size +  j, size=1)
+
+                r[i][elem] = SolvedBits(A, field_size) 
+
+        # Store shares in vectorized containers
+        self.y = [sint.load_mem(vec.address, size=length) for (vec, length) in
+                zip(y, self.layer_lengths)]
+        self.r = [sint.load_mem(vec.address, size=length) for (vec, length) in
+                zip(r, self.layer_lengths)]
+    
+    def __del__(self):
+        close_channel(self.channel)
+
+
+# Time online phase
+start = time.clock()
+for (layer_num, layer_size) in enumerate(layers):
+    # Derive client input size and layer size
+    input_bits_size = 2*layer_size*field_size
+    
+    # Process input
+    client = Client_Connection(layer_num, layer_size, input_bits_size)
+    server = Server_Connection(layer_num, layer_size, input_bits_size)
+
+    # Exchange shares of GC labels
+    g = [sint.Array(length) for length in client.bits_lengths]
+    for j in range(5):
+        for i in range(len(client.bits_lengths)):
+            g[i] = server.zero_labels[i] - (server.zero_labels[i] - server.one_labels[i]) * client.bits[i]
+    
+    # Reconstruct client's M_i r_i - s_i and r_i+1 from committed bits
+    client.reconstruct_bits()
+
+    # Compute MAC shares
+    ay_prime = [server.a[i] * client.y[i] for i in
+            range(len(client.layer_lengths))]
+    br_prime = [server.b[i] * client.r[i] for i in
+            range(len(client.layer_lengths))]
+
+    # Client reveals shares of 0 to server
+    for i in range(len(client.layer_lengths)):
+        (ay_prime[i] - client.ay[i]).reveal_to(0, server.channel)
+    
+    for i in range(len(client.layer_lengths)):
+        (br_prime[i] - client.br[i]).reveal_to(0, server.channel)
+
+    # Both parties output their shares of GC labels
+    for j in range(5):
+        for i in range(len(client.layer_lengths)):
+            output_shares(client.channel, *g[i])
+            output_shares(server.channel, *g[i])
+
+    # TODO: This shouldn't be here once we aren't restarting
+    del client
+    del server
+
+end = time.clock()
+print_ln("Took: %s", end - start)
+
+clear_memory()
+clear_registers()
+restart()
