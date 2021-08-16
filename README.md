@@ -180,7 +180,7 @@ Muse is licensed under either of the following licenses, at your discretion.
 
 Unless you explicitly state otherwise, any contribution submitted for inclusion in Muse by you shall be dual licensed as above (as defined in the Apache v2 License), without any additional terms or conditions.
 
-[muse]: https://www.usenix.org/system/files/sec21fall-lehmkuhl.pdf
+[muse]: https://eprint.iacr.org/2021/1040
 
 ## Reference paper
 
