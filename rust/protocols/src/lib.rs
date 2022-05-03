@@ -20,9 +20,6 @@ pub mod neural_network;
 
 mod error;
 
-//#[cfg(test)]
-//mod tests;
-
 pub type AdditiveShare<P> = crypto_primitives::AdditiveShare<FixedPoint<P>>;
 pub type AuthAdditiveShare<P> = crypto_primitives::AuthAdditiveShare<P>;
 
